@@ -25,11 +25,28 @@ static volatile bool overflow = false;
 //variáveis do cb
 circular_buffer cbuf;
 
-volatile bool tick_64ms = false;
+volatile bool p1 = false;
+volatile bool p2 = false;
+volatile bool p3 = false;
+
+static uint32_t tick_64ms = 0;
 
 static bool IRAM_ATTR i2s_rx_on_recv_cb(i2s_chan_handle_t handle, i2s_event_data_t *event_data, void *user_ctx)
 {
-    tick_64ms = true;
+    tick_64ms ++;
+
+    p1 = true;
+
+    if(tick_64ms % 2 ==0){
+        p2 = true;
+    }
+    if(tick_64ms % 4 ==0){
+        p3 = true;
+    }
+    if (tick_64ms >= 4)
+    {
+        tick_64ms = 0;
+    }
     return false;
 }
 
@@ -107,5 +124,21 @@ void app_main(void)
     esp_task_wdt_deinit();
     pp_init(&ppbuf);
     init_i2s_inmp441();
+
+    while(1){
+        if(p1){
+            p1=false;
+
+        }
+        if(p2){
+            p2=false;
+
+        }
+        if(p3){
+            p3=false;
+
+        }
+
+    }
 
 }
