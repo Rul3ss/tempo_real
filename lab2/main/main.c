@@ -7,6 +7,7 @@
 
 #include "esp_task_wdt.h"
 #include "driver/i2s_std.h"
+#include "driver/gptimer.h"
 
 #include "config.h"
 #include "bufferpp.h"
@@ -18,11 +19,11 @@
 #include "fft.h"
 #include "mediamovel.h"
 
-//variáveis do pp
+// variáveis do pp
 pingpong_buffer ppbuf;
 static volatile bool overflow = false;
 
-//variáveis do cb
+// variáveis do cb
 circular_buffer cbuf;
 
 volatile bool p_alta = false;
@@ -31,23 +32,63 @@ volatile bool p_baixa = false;
 
 static uint32_t tick = 0;
 
-static bool IRAM_ATTR i2s_rx_on_recv_cb(i2s_chan_handle_t handle, i2s_event_data_t *event_data, void *user_ctx)
+static bool IRAM_ATTR timer_64ms_cb(
+    gptimer_handle_t timer,
+    const gptimer_alarm_event_data_t *edata,
+    void *user_ctx
+)
 {
-    tick ++;
+    tick++;
 
     p_alta = true;
 
-    if(tick % 2 ==0){
+    if (tick % 2 == 0)
+    {
         p_media = true;
     }
-    if(tick % 4 ==0){
+
+    if (tick % 4 == 0)
+    {
         p_baixa = true;
     }
+
     if (tick >= 4)
     {
         tick = 0;
     }
+
     return false;
+}
+
+gptimer_handle_t gptimer_64ms = NULL;
+
+void init_gptimer_64ms(void)
+{
+    gptimer_config_t timer_config = {
+        .clk_src = GPTIMER_CLK_SRC_DEFAULT,
+        .direction = GPTIMER_COUNT_UP,
+        .resolution_hz = 1000000, // 1 MHz -> 1 tick = 1 us
+        .intr_priority = 3,
+    };
+
+    ESP_ERROR_CHECK(gptimer_new_timer(&timer_config, &gptimer_64ms));
+
+    gptimer_event_callbacks_t cbs = {
+        .on_alarm = timer_64ms_cb,
+    };
+
+    ESP_ERROR_CHECK(gptimer_register_event_callbacks(gptimer_64ms, &cbs, NULL));
+
+    gptimer_alarm_config_t alarm_config = {
+        .reload_count = 0,
+        .alarm_count = 64000, // 64 ms = 64000 us
+        .flags.auto_reload_on_alarm = true,
+    };
+
+    ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer_64ms, &alarm_config));
+
+    ESP_ERROR_CHECK(gptimer_enable(gptimer_64ms));
+    ESP_ERROR_CHECK(gptimer_start(gptimer_64ms));
 }
 
 i2s_chan_handle_t rx_chan;
@@ -86,19 +127,13 @@ void init_i2s_inmp441()
     // 3. INICIALIZA O MODO PADRÃO (Esta é a linha crítica que estava faltando!)
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_chan, &std_cfg));
 
-    i2s_event_callbacks_t cbs = {
-        .on_recv = i2s_rx_on_recv_cb,
-        .on_recv_q_ovf = NULL,
-    };
-    ESP_ERROR_CHECK(i2s_channel_register_event_callback(rx_chan, &cbs, NULL));
-
     // 5. Finalmente, habilita (liga) a leitura do I2S
     ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
 }
 
 void tarefa_aquisicao_i2s(void)
 {
-    static int32_t raw_buffer[256];
+    static int32_t raw_buffer[BLOCK_SIZE];
     size_t bytes_read = 0;
 
     esp_err_t ret = i2s_channel_read(rx_chan, raw_buffer, sizeof(raw_buffer),
@@ -106,7 +141,7 @@ void tarefa_aquisicao_i2s(void)
 
     if (ret == ESP_OK && bytes_read > 0)
     {
-        size_t samples_count = bytes_read / 4;
+        size_t samples_count = bytes_read / sizeof(int32_t);
 
         for (int i = 0; i < samples_count; i++)
         {
@@ -124,6 +159,7 @@ void app_main(void)
     esp_task_wdt_deinit();
     pp_init(&ppbuf);
     init_i2s_inmp441();
+    init_gptimer_64ms();
 
     static int16_t filtered_data[BLOCK_SIZE];
 
@@ -142,9 +178,11 @@ void app_main(void)
 
     bool flag_evento_pendente = false;
 
-    while(1){
-        if(p_alta){
-            p_alta=false;
+    while (1)
+    {
+        if (p_alta)
+        {
+            p_alta = false;
 
             tarefa_aquisicao_i2s();
 
@@ -166,10 +204,10 @@ void app_main(void)
 
                 pp_release_block(&ppbuf, block);
             }
-
         }
-        if(p_media){
-            p_media=false;
+        if (p_media)
+        {
+            p_media = false;
 
             freq_dominante = 0.0f;
 
@@ -178,27 +216,22 @@ void app_main(void)
             freq_suavizada = calcular_media_movel(
                 &freq_cbuf,
                 &soma_freqs,
-                freq_dominante
-            );
+                freq_dominante);
 
             nota_atual = identificar_nota_musical(freq_suavizada);
-
         }
-        if(p_baixa){
-            p_baixa=false;
+        if (p_baixa)
+        {
+            p_baixa = false;
 
             imprime_evento(
                 flag_evento_pendente,
                 energia_evento,
                 freq_dominante,
                 freq_suavizada,
-                nota_atual
-            );
+                nota_atual);
 
             flag_evento_pendente = false;
-
         }
-
     }
-
 }
