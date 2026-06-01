@@ -25,27 +25,27 @@ static volatile bool overflow = false;
 //variáveis do cb
 circular_buffer cbuf;
 
-volatile bool p1 = false;
-volatile bool p2 = false;
-volatile bool p3 = false;
+volatile bool p_alta = false;
+volatile bool p_media = false;
+volatile bool p_baixa = false;
 
-static uint32_t tick_64ms = 0;
+static uint32_t tick = 0;
 
 static bool IRAM_ATTR i2s_rx_on_recv_cb(i2s_chan_handle_t handle, i2s_event_data_t *event_data, void *user_ctx)
 {
-    tick_64ms ++;
+    tick ++;
 
-    p1 = true;
+    p_alta = true;
 
-    if(tick_64ms % 2 ==0){
-        p2 = true;
+    if(tick % 2 ==0){
+        p_media = true;
     }
-    if(tick_64ms % 4 ==0){
-        p3 = true;
+    if(tick % 4 ==0){
+        p_baixa = true;
     }
-    if (tick_64ms >= 4)
+    if (tick >= 4)
     {
-        tick_64ms = 0;
+        tick = 0;
     }
     return false;
 }
@@ -125,17 +125,77 @@ void app_main(void)
     pp_init(&ppbuf);
     init_i2s_inmp441();
 
+    static int16_t filtered_data[BLOCK_SIZE];
+
+    circular_buffer freq_cbuf;
+    float soma_freqs = 0.0f;
+
+    cb_init(&freq_cbuf, WINDOW_SIZE);
+
+    float energia = 0.0f;
+    float energia_evento = 0.0f;
+
+    float freq_dominante = 0.0f;
+    float freq_suavizada = 0.0f;
+
+    NotaInfo nota_atual = {"--", 0.0f, "silencio"};
+
+    bool flag_evento_pendente = false;
+
     while(1){
-        if(p1){
-            p1=false;
+        if(p_alta){
+            p_alta=false;
+
+            tarefa_aquisicao_i2s();
+
+            int block = pp_get_ready_block(&ppbuf);
+
+            if (block != -1)
+            {
+                int16_t *raw_data = pp_get_block_data(&ppbuf, block);
+
+                apply_fir(raw_data, filtered_data, BLOCK_SIZE);
+
+                energia = system_energy(filtered_data, BLOCK_SIZE);
+
+                if (detecta_evento(energia))
+                {
+                    flag_evento_pendente = true;
+                    energia_evento = energia;
+                }
+
+                pp_release_block(&ppbuf, block);
+            }
 
         }
-        if(p2){
-            p2=false;
+        if(p_media){
+            p_media=false;
+
+            freq_dominante = 0.0f;
+
+            calcular_fft_e_frequencia(filtered_data, &freq_dominante);
+
+            freq_suavizada = calcular_media_movel(
+                &freq_cbuf,
+                &soma_freqs,
+                freq_dominante
+            );
+
+            nota_atual = identificar_nota_musical(freq_suavizada);
 
         }
-        if(p3){
-            p3=false;
+        if(p_baixa){
+            p_baixa=false;
+
+            imprime_evento(
+                flag_evento_pendente,
+                energia_evento,
+                freq_dominante,
+                freq_suavizada,
+                nota_atual
+            );
+
+            flag_evento_pendente = false;
 
         }
 
