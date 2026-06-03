@@ -27,8 +27,43 @@ static volatile bool overflow = false;
 // variáveis do cb
 circular_buffer cbuf;
 
-#define NUM_TAREFAS 3
+#define NUM_TAREFAS 9
 #define MS_TO_US(ms) ((ms) * 1000ULL)
+
+static int bloco_atual = -1;
+static int16_t *raw_data_atual = NULL;
+
+static int16_t filtered_data[BLOCK_SIZE];
+
+static circular_buffer freq_cbuf;
+static float soma_freqs = 0.0f;
+
+static float energia = 0.0f;
+static float energia_evento = 0.0f;
+
+static float freq_dominante = 0.0f;
+static float freq_suavizada = 0.0f;
+
+static NotaInfo nota_atual = {"--", 0.0f, "silencio"};
+
+static bool flag_evento_pendente = false;
+static bool flag_bloco_pronto = false;
+static bool flag_filtrado_pronto = false;
+static bool flag_energia_pronta = false;
+static bool flag_fft_pronta = false;
+static bool flag_media_pronta = false;
+
+void tarefa_aquisicao_i2s(void);
+void tarefa_pega_bloco(void);
+void tarefa_filtro_fir(void);
+void tarefa_calcula_energia(void);
+void tarefa_detecta_evento(void);
+void tarefa_fft(void);
+void tarefa_media_movel(void);
+void tarefa_identifica_nota(void);
+void tarefa_impressao(void);
+
+typedef void (*FuncTarefa)(void);
 
 typedef struct
 {
@@ -38,19 +73,27 @@ typedef struct
     uint64_t proxima_execucao_us;
 
     volatile bool flag;
+
+    FuncTarefa func;
+
 } Tarefa;
 
 Tarefa tabela[NUM_TAREFAS] = {
-    {"T1", MS_TO_US(64),  0, false},
-    {"T2", MS_TO_US(128), 0, false},
-    {"T3", MS_TO_US(256), 0, false}
+    {"AQUISICAO",        MS_TO_US(64),  0, false, tarefa_aquisicao_i2s},
+    {"PEGA_BLOCO",       MS_TO_US(64),  0, false, tarefa_pega_bloco},
+    {"FILTRO_FIR",       MS_TO_US(64),  0, false, tarefa_filtro_fir},
+    {"ENERGIA",          MS_TO_US(64),  0, false, tarefa_calcula_energia},
+    {"DETECTA_EVENTO",   MS_TO_US(64),  0, false, tarefa_detecta_evento},
+    {"FFT",              MS_TO_US(128), 0, false, tarefa_fft},
+    {"MEDIA_MOVEL",      MS_TO_US(128), 0, false, tarefa_media_movel},
+    {"IDENTIFICA_NOTA",  MS_TO_US(128), 0, false, tarefa_identifica_nota},
+    {"IMPRESSAO",        MS_TO_US(256), 0, false, tarefa_impressao}
 };
 
 static bool IRAM_ATTR timer_64ms_cb(
     gptimer_handle_t timer,
     const gptimer_alarm_event_data_t *edata,
-    void *user_ctx
-)
+    void *user_ctx)
 {
     uint64_t agora = esp_timer_get_time();
 
@@ -161,6 +204,132 @@ void tarefa_aquisicao_i2s(void)
     }
 }
 
+void tarefa_pega_bloco(void)
+{
+    if (flag_bloco_pronto)
+    {
+        return;
+    }
+
+    bloco_atual = pp_get_ready_block(&ppbuf);
+
+    if (bloco_atual == -1)
+    {
+        raw_data_atual = NULL;
+        return;
+    }
+
+    raw_data_atual = pp_get_block_data(&ppbuf, bloco_atual);
+
+    flag_bloco_pronto = true;
+}
+
+void tarefa_filtro_fir(void)
+{
+    if (!flag_bloco_pronto)
+    {
+        return;
+    }
+
+    if (raw_data_atual == NULL)
+    {
+        return;
+    }
+
+    apply_fir(raw_data_atual, filtered_data, BLOCK_SIZE);
+
+    flag_filtrado_pronto = true;
+}
+
+void tarefa_calcula_energia(void)
+{
+    if (!flag_filtrado_pronto)
+    {
+        return;
+    }
+
+    energia = system_energy(filtered_data, BLOCK_SIZE);
+
+    flag_energia_pronta = true;
+}
+
+void tarefa_detecta_evento(void)
+{
+    if (!flag_energia_pronta)
+    {
+        return;
+    }
+
+    if (detecta_evento(energia))
+    {
+        flag_evento_pendente = true;
+        energia_evento = energia;
+    }
+
+    if (bloco_atual != -1)
+    {
+        pp_release_block(&ppbuf, bloco_atual);
+    }
+
+    bloco_atual = -1;
+    raw_data_atual = NULL;
+
+    flag_bloco_pronto = false;
+    flag_filtrado_pronto = false;
+    flag_energia_pronta = false;
+}
+
+void tarefa_fft(void)
+{
+    freq_dominante = 0.0f;
+
+    calcular_fft_e_frequencia(filtered_data, &freq_dominante);
+
+    flag_fft_pronta = true;
+}
+
+void tarefa_media_movel(void)
+{
+    if (!flag_fft_pronta)
+    {
+        return;
+    }
+
+    freq_suavizada = calcular_media_movel(
+        &freq_cbuf,
+        &soma_freqs,
+        freq_dominante
+    );
+
+    flag_media_pronta = true;
+}
+
+void tarefa_identifica_nota(void)
+{
+    if (!flag_media_pronta)
+    {
+        return;
+    }
+
+    nota_atual = identificar_nota_musical(freq_suavizada);
+
+    flag_fft_pronta = false;
+    flag_media_pronta = false;
+}
+
+void tarefa_impressao(void)
+{
+    imprime_evento(
+        flag_evento_pendente,
+        energia_evento,
+        freq_dominante,
+        freq_suavizada,
+        nota_atual
+    );
+
+    flag_evento_pendente = false;
+}
+
 void app_main(void)
 {
     esp_task_wdt_deinit();
@@ -168,77 +337,19 @@ void app_main(void)
     init_i2s_inmp441();
     init_gptimer_64ms();
 
-    static int16_t filtered_data[BLOCK_SIZE];
-
-    circular_buffer freq_cbuf;
-    float soma_freqs = 0.0f;
-
-    cb_init(&freq_cbuf, WINDOW_SIZE);
-
-    float energia = 0.0f;
-    float energia_evento = 0.0f;
-
-    float freq_dominante = 0.0f;
-    float freq_suavizada = 0.0f;
-
-    NotaInfo nota_atual = {"--", 0.0f, "silencio"};
-
-    bool flag_evento_pendente = false;
-
     while (1)
     {
-        if (tabela[0].flag)
+        for (int i = 0; i < NUM_TAREFAS; i++)
         {
-            tabela[0].flag = false;
-
-            tarefa_aquisicao_i2s();
-
-            int block = pp_get_ready_block(&ppbuf);
-
-            if (block != -1)
+            if (tabela[i].flag)
             {
-                int16_t *raw_data = pp_get_block_data(&ppbuf, block);
-
-                apply_fir(raw_data, filtered_data, BLOCK_SIZE);
-
-                energia = system_energy(filtered_data, BLOCK_SIZE);
-
-                if (detecta_evento(energia))
-                {
-                    flag_evento_pendente = true;
-                    energia_evento = energia;
-                }
-
-                pp_release_block(&ppbuf, block);
+                tabela[i].flag = false;
+                tabela[i].func();
+                break;
             }
-        }
-        else if (tabela[1].flag)
-        {
-            tabela[1].flag = false;
-
-            freq_dominante = 0.0f;
-
-            calcular_fft_e_frequencia(filtered_data, &freq_dominante);
-
-            freq_suavizada = calcular_media_movel(
-                &freq_cbuf,
-                &soma_freqs,
-                freq_dominante);
-
-            nota_atual = identificar_nota_musical(freq_suavizada);
-        }
-        else if (tabela[2].flag)
-        {
-            tabela[2].flag = false;
-
-            imprime_evento(
-                flag_evento_pendente,
-                energia_evento,
-                freq_dominante,
-                freq_suavizada,
-                nota_atual);
-
-            flag_evento_pendente = false;
+            
         }
     }
+
+    
 }
