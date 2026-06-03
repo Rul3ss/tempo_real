@@ -8,6 +8,7 @@
 #include "esp_task_wdt.h"
 #include "driver/i2s_std.h"
 #include "driver/gptimer.h"
+#include "esp_timer.h"
 
 #include "config.h"
 #include "bufferpp.h"
@@ -26,11 +27,24 @@ static volatile bool overflow = false;
 // variáveis do cb
 circular_buffer cbuf;
 
-volatile bool p_alta = false;
-volatile bool p_media = false;
-volatile bool p_baixa = false;
+#define NUM_TAREFAS 3
+#define MS_TO_US(ms) ((ms) * 1000ULL)
 
-static uint32_t tick = 0;
+typedef struct
+{
+    const char *nome;
+
+    uint64_t periodo_us;
+    uint64_t proxima_execucao_us;
+
+    volatile bool flag;
+} Tarefa;
+
+Tarefa tabela[NUM_TAREFAS] = {
+    {"T1", MS_TO_US(64),  0, false},
+    {"T2", MS_TO_US(128), 0, false},
+    {"T3", MS_TO_US(256), 0, false}
+};
 
 static bool IRAM_ATTR timer_64ms_cb(
     gptimer_handle_t timer,
@@ -38,23 +52,16 @@ static bool IRAM_ATTR timer_64ms_cb(
     void *user_ctx
 )
 {
-    tick++;
+    uint64_t agora = esp_timer_get_time();
 
-    p_alta = true;
-
-    if (tick % 2 == 0)
+    for (int i = 0; i < NUM_TAREFAS; i++)
     {
-        p_media = true;
-    }
+        if (agora >= tabela[i].proxima_execucao_us)
+        {
+            tabela[i].flag = true;
 
-    if (tick % 4 == 0)
-    {
-        p_baixa = true;
-    }
-
-    if (tick >= 4)
-    {
-        tick = 0;
+            tabela[i].proxima_execucao_us = agora + tabela[i].periodo_us;
+        }
     }
 
     return false;
@@ -81,7 +88,7 @@ void init_gptimer_64ms(void)
 
     gptimer_alarm_config_t alarm_config = {
         .reload_count = 0,
-        .alarm_count = 64000, // 64 ms = 64000 us
+        .alarm_count = 32000, // 64 ms = 64000 us
         .flags.auto_reload_on_alarm = true,
     };
 
@@ -180,9 +187,9 @@ void app_main(void)
 
     while (1)
     {
-        if (p_alta)
+        if (tabela[0].flag)
         {
-            p_alta = false;
+            tabela[0].flag = false;
 
             tarefa_aquisicao_i2s();
 
@@ -205,9 +212,9 @@ void app_main(void)
                 pp_release_block(&ppbuf, block);
             }
         }
-        if (p_media)
+        else if (tabela[1].flag)
         {
-            p_media = false;
+            tabela[1].flag = false;
 
             freq_dominante = 0.0f;
 
@@ -220,9 +227,9 @@ void app_main(void)
 
             nota_atual = identificar_nota_musical(freq_suavizada);
         }
-        if (p_baixa)
+        else if (tabela[2].flag)
         {
-            p_baixa = false;
+            tabela[2].flag = false;
 
             imprime_evento(
                 flag_evento_pendente,
