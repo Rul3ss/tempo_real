@@ -8,7 +8,7 @@
 #define BLOCK_SIZE 1024
 #define SAMPLE_RATE 16000
 
-#define LIMIAR 0.2f
+#define LIMIAR 0.3f
 #define FIR_TAPS 64
 
 #define REFRACTORY_BLOCKS 10

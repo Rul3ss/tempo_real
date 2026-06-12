@@ -79,15 +79,15 @@ typedef struct
 } Tarefa;
 
 Tarefa tabela[NUM_TAREFAS] = {
-    {"AQUISICAO", MS_TO_US(1000), 500, false, tarefa_aquisicao_i2s},
-    {"PEGA_BLOCO", MS_TO_US(1000), 0, false, tarefa_pega_bloco},
-    {"FILTRO_FIR", MS_TO_US(1000), 0, false, tarefa_filtro_fir},
-    {"ENERGIA", MS_TO_US(1000), 0, false, tarefa_calcula_energia},
-    {"DETECTA_EVENTO", MS_TO_US(1000), 0, false, tarefa_detecta_evento},
-    {"FFT", MS_TO_US(1280), 0, false, tarefa_fft},
-    {"MEDIA_MOVEL", MS_TO_US(1280), 0, false, tarefa_media_movel},
-    {"IDENTIFICA_NOTA", MS_TO_US(1280), 0, false, tarefa_identifica_nota},
-    {"IMPRESSAO", MS_TO_US(2560), 0, false, tarefa_impressao}};
+    {"AQUISICAO", MS_TO_US(64), 0, false, tarefa_aquisicao_i2s},
+    {"PEGA_BLOCO", MS_TO_US(64), 0, false, tarefa_pega_bloco},
+    {"FILTRO_FIR", MS_TO_US(64), 0, false, tarefa_filtro_fir},
+    {"ENERGIA", MS_TO_US(64), 0, false, tarefa_calcula_energia},
+    {"DETECTA_EVENTO", MS_TO_US(64), 0, false, tarefa_detecta_evento},
+    {"FFT", MS_TO_US(128), 0, false, tarefa_fft},
+    {"MEDIA_MOVEL", MS_TO_US(128), 0, false, tarefa_media_movel},
+    {"IDENTIFICA_NOTA", MS_TO_US(128), 0, false, tarefa_identifica_nota},
+    {"IMPRESSAO", MS_TO_US(256), 0, false, tarefa_impressao}};
 
 static bool IRAM_ATTR timer_64ms_cb(
     gptimer_handle_t timer,
@@ -130,7 +130,7 @@ void init_gptimer_64ms(void)
 
     gptimer_alarm_config_t alarm_config = {
         .reload_count = 0,
-        .alarm_count = 32000, // 64 ms = 64000 us   32000
+        .alarm_count = 1000, // 64 ms = 64000 us   32000
         .flags.auto_reload_on_alarm = true,
     };
 
@@ -263,6 +263,9 @@ void tarefa_detecta_evento(void)
     {
         flag_evento_pendente = true;
         energia_evento = energia;
+
+        cb_init(&freq_cbuf, WINDOW_SIZE);
+        soma_freqs = 0.0f;
     }
 
     if (bloco_atual != -1)
@@ -276,10 +279,14 @@ void tarefa_detecta_evento(void)
     flag_bloco_pronto = false;
     flag_filtrado_pronto = false;
     flag_energia_pronta = false;
+
+    block_count++;
 }
 
 void tarefa_fft(void)
 {
+    if (!flag_filtrado_pronto) return;
+
     freq_dominante = 0.0f;
 
     calcular_fft_e_frequencia(filtered_data, &freq_dominante);
@@ -324,11 +331,14 @@ void tarefa_impressao(void)
         freq_suavizada,
         nota_atual);
 
-    flag_evento_pendente = false;
+        flag_evento_pendente = false;
+
+
 }
 
 void app_main(void)
 {
+    cb_init(&freq_cbuf, WINDOW_SIZE);
     esp_task_wdt_deinit();
     pp_init(&ppbuf);
     init_i2s_inmp441();
